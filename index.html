@@ -928,14 +928,24 @@
         // ============================================================================
         // COMPONENTE: DASHBOARD DE INDICADORES (Oscuro)
         // ============================================================================
-        const IndicadoresDashboard = ({ equipos, indicadores, sincronizando, errorSync }) => {
+        const IndicadoresDashboard = ({ equipos, indicadores, sincronizando, errorSync, onGuardarIndicador }) => {
             const [dataSet, setDataSet] = useState({});
             const [historico, setHistorico] = useState({ meses: [], mp: [], gastoTotal: [] });
             const [currentMonth, setCurrentMonth] = useState('');
             const [isAnnualView, setIsAnnualView] = useState(false);
             const [isLoading, setIsLoading] = useState(true);
             const [error, setError] = useState(false);
-            const [dashYear, setDashYear] = useState(new Date().getFullYear()); 
+            const [dashYear, setDashYear] = useState(new Date().getFullYear());
+
+            // [MEJORA] Captura/edición directa de indicadores desde la app,
+            // en vez de depender solo de capturar a mano en Sheets.
+            const [modalIndicadorAbierto, setModalIndicadorAbierto] = useState(false);
+            const [mesModalIndicador, setMesModalIndicador] = useState('');
+            const abrirCapturaIndicadores = () => {
+                const mesDefault = (!isAnnualView && currentMonth) ? currentMonth : MESES_INDICADOR[new Date().getMonth()];
+                setMesModalIndicador(mesDefault);
+                setModalIndicadorAbierto(true);
+            };
 
             // Refs para los canvas de Chart.js
             const ratioChartRef = useRef(null);
@@ -1191,9 +1201,19 @@
                     <h2 className="text-2xl font-bold mb-2">Sin indicadores capturados</h2>
                     <p className="text-slate-500 max-w-md">
                         La hoja <strong>"Indicadores"</strong> del libro de inventario aún no tiene filas.
-                        Captura una fila por mes (columna <code>mes</code> en minúsculas: enero, febrero...)
-                        con los KPI del periodo y vuelve a sincronizar.
+                        Captúralas directamente desde aquí, o a mano en Sheets (columna <code>mes</code> en
+                        minúsculas: enero, febrero...) y vuelve a sincronizar.
                     </p>
+                    {onGuardarIndicador && (
+                        <button onClick={abrirCapturaIndicadores}
+                                className="mt-4 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-5 rounded-lg transition-colors">
+                            <i className="fa-solid fa-plus mr-2"></i>Capturar el primer mes
+                        </button>
+                    )}
+                    {modalIndicadorAbierto && (
+                        <ModalIndicador mesInicial={mesModalIndicador} indicadores={indicadores}
+                                        onGuardar={onGuardarIndicador} onCerrar={() => setModalIndicadorAbierto(false)} />
+                    )}
                 </div>
             );
 
@@ -1226,6 +1246,12 @@
                                     <i className="fa-solid fa-print"></i>
                                 </button>
                             </div>
+                            {onGuardarIndicador && (
+                                <button onClick={abrirCapturaIndicadores}
+                                        className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1.5 px-4 rounded-lg transition-colors flex items-center border border-blue-500">
+                                    <i className="fa-solid fa-pen-to-square mr-2"></i>Actualizar indicadores
+                                </button>
+                            )}
                         </div>
                     </header>
 
@@ -1372,6 +1398,173 @@
                             ))}
                         </div>
                         <p className="text-xs text-slate-500 mt-4 text-center italic"><i className="fas fa-info-circle"></i> Los equipos "Fuera de Servicio" no penalizan la métrica de Programados.</p>
+                    </div>
+
+                    {modalIndicadorAbierto && (
+                        <ModalIndicador mesInicial={mesModalIndicador} indicadores={indicadores}
+                                        onGuardar={onGuardarIndicador} onCerrar={() => setModalIndicadorAbierto(false)} />
+                    )}
+                </div>
+            );
+        };
+
+        // ============================================================================
+        // [MEJORA] CAPTURA/EDICIÓN DIRECTA DE INDICADORES DESDE LA APP
+        // ----------------------------------------------------------------------------
+        // Hasta ahora la hoja "Indicadores" solo se llenaba a mano en Sheets. Este
+        // modal permite capturar o corregir la fila de un mes sin salir del CMMS.
+        // El backend hace upsert por "mes" (accionIndicador en Codigo.gs): si el mes
+        // ya existe se actualiza esa fila, si no, se agrega una nueva.
+        // ============================================================================
+        const MESES_INDICADOR = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+            'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+
+        const CAMPOS_INDICADOR_KPI = [
+            ['mp_cumplimiento', 'Cumplimiento MP (%)'],
+            ['mttr', 'MTTR (hrs)'],
+            ['ratio_mp', 'Ratio MP (%)'],
+            ['ratio_mc', 'Ratio MC (%)']
+        ];
+        const CAMPOS_INDICADOR_DOWNTIME = [
+            ['downtime_resonancia', 'Downtime Resonancia (hrs)'],
+            ['downtime_tomografia', 'Downtime Tomografía (hrs)'],
+            ['downtime_hemodinamia', 'Downtime Hemodinamia (hrs)'],
+            ['downtime_rayos_x', 'Downtime Rayos X (hrs)']
+        ];
+        const CAMPOS_INDICADOR_PRESUPUESTO = [
+            ['presupuesto_total_asig', 'Presupuesto Total Asignado'],
+            ['presupuesto_total_ejer', 'Presupuesto Total Ejercido'],
+            ['presupuesto_mtto_asig', 'Presupuesto Mtto. Asignado'],
+            ['presupuesto_mtto_ejer', 'Presupuesto Mtto. Ejercido']
+        ];
+        const TIPOS_RETO = [
+            { id: 'primary', label: 'Informativo' },
+            { id: 'success', label: 'Logro' },
+            { id: 'warning', label: 'Alerta' },
+            { id: 'danger',  label: 'Crítico' }
+        ];
+        const CAMPOS_INDICADOR_NUMERICOS = CAMPOS_INDICADOR_KPI
+            .concat(CAMPOS_INDICADOR_DOWNTIME, CAMPOS_INDICADOR_PRESUPUESTO)
+            .map(([clave]) => clave);
+
+        const valorInicialIndicador = (mes, filaExistente) => {
+            const base = { mes };
+            CAMPOS_INDICADOR_NUMERICOS.forEach((clave) => {
+                base[clave] = (filaExistente && filaExistente[clave] !== undefined && filaExistente[clave] !== null)
+                    ? filaExistente[clave] : '';
+            });
+            for (let i = 1; i <= 5; i++) {
+                base[`reto${i}_titulo`] = filaExistente ? (filaExistente[`reto${i}_titulo`] || '') : '';
+                base[`reto${i}_desc`]   = filaExistente ? (filaExistente[`reto${i}_desc`] || '') : '';
+                base[`reto${i}_tipo`]   = filaExistente ? (filaExistente[`reto${i}_tipo`] || 'primary') : 'primary';
+            }
+            return base;
+        };
+
+        const ModalIndicador = ({ mesInicial, indicadores, onGuardar, onCerrar }) => {
+            const buscarFila = (mes) => (indicadores || []).find(r =>
+                String(r.mes || '').trim().toLowerCase() === mes);
+
+            const [form, setForm] = useState(() => valorInicialIndicador(mesInicial, buscarFila(mesInicial)));
+            const [guardando, setGuardando] = useState(false);
+            const [error, setError] = useState(null);
+            const filaExistente = buscarFila(form.mes);
+
+            const campo = (clave, valor) => setForm(f => ({ ...f, [clave]: valor }));
+            const cambiarMes = (nuevoMes) => setForm(valorInicialIndicador(nuevoMes, buscarFila(nuevoMes)));
+
+            const guardar = async () => {
+                if (!onGuardar) return;
+                setGuardando(true);
+                setError(null);
+                const r = await onGuardar(form);
+                setGuardando(false);
+                if (r && r.ok) onCerrar();
+                else setError((r && r.error) || 'No se pudo guardar.');
+            };
+
+            const grupoNumerico = (campos) => campos.map(([clave, etiqueta]) => (
+                <label key={clave} className="text-xs text-slate-400 flex flex-col gap-1">
+                    {etiqueta}
+                    <input type="number" step="any" value={form[clave]}
+                           onChange={(e) => campo(clave, e.target.value)}
+                           className="bg-dark border border-slate-700 rounded px-2 py-1.5 text-white outline-none focus:border-primary" />
+                </label>
+            ));
+
+            return (
+                <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4 print-hidden">
+                    <div className="bg-panel border border-slate-800 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold text-white">
+                                <i className="fa-solid fa-pen-to-square text-primary mr-2"></i>
+                                Capturar / actualizar indicadores
+                            </h2>
+                            <button onClick={onCerrar} className="text-slate-400 hover:text-white text-2xl leading-none">&times;</button>
+                        </div>
+
+                        {filaExistente
+                            ? <p className="text-xs text-amber-400 mb-3"><i className="fa-solid fa-triangle-exclamation mr-1"></i>Ya existe una fila capturada para este mes: se actualizará en lugar de duplicarla.</p>
+                            : <p className="text-xs text-slate-500 mb-3">Este mes aún no tiene fila en la hoja "Indicadores": se creará una nueva.</p>}
+
+                        <label className="text-xs text-slate-400 flex flex-col gap-1 mb-4 max-w-xs">
+                            Mes
+                            <select value={form.mes} onChange={(e) => cambiarMes(e.target.value)}
+                                    className="bg-dark border border-slate-700 rounded px-2 py-1.5 text-white outline-none focus:border-primary capitalize">
+                                {MESES_INDICADOR.map(m => <option key={m} value={m} className="capitalize">{m}</option>)}
+                            </select>
+                        </label>
+
+                        <h3 className="text-sm font-bold text-slate-300 mb-2">KPI del periodo</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                            {grupoNumerico(CAMPOS_INDICADOR_KPI)}
+                        </div>
+
+                        <h3 className="text-sm font-bold text-slate-300 mb-2">Downtime por modalidad (hrs)</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                            {grupoNumerico(CAMPOS_INDICADOR_DOWNTIME)}
+                        </div>
+
+                        <h3 className="text-sm font-bold text-slate-300 mb-2">Presupuesto (MXN)</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                            {grupoNumerico(CAMPOS_INDICADOR_PRESUPUESTO)}
+                        </div>
+
+                        <h3 className="text-sm font-bold text-slate-300 mb-2">Retos y hallazgos del mes (hasta 5, opcional)</h3>
+                        <div className="space-y-3 mb-4">
+                            {[1, 2, 3, 4, 5].map(i => (
+                                <div key={i} className="grid grid-cols-1 md:grid-cols-[1fr_2fr_auto] gap-2 bg-dark/60 border border-slate-800 rounded-lg p-2">
+                                    <input type="text" placeholder={`Título del reto ${i}`} value={form[`reto${i}_titulo`]}
+                                           onChange={(e) => campo(`reto${i}_titulo`, e.target.value)}
+                                           className="bg-dark border border-slate-700 rounded px-2 py-1.5 text-white text-sm outline-none focus:border-primary" />
+                                    <input type="text" placeholder="Descripción" value={form[`reto${i}_desc`]}
+                                           onChange={(e) => campo(`reto${i}_desc`, e.target.value)}
+                                           className="bg-dark border border-slate-700 rounded px-2 py-1.5 text-white text-sm outline-none focus:border-primary" />
+                                    <select value={form[`reto${i}_tipo`]} onChange={(e) => campo(`reto${i}_tipo`, e.target.value)}
+                                            className="bg-dark border border-slate-700 rounded px-2 py-1.5 text-white text-sm outline-none focus:border-primary">
+                                        {TIPOS_RETO.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                                    </select>
+                                </div>
+                            ))}
+                        </div>
+
+                        {error && (
+                            <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded-lg p-3 mb-4">
+                                <i className="fa-solid fa-circle-exclamation mr-1"></i>{error}
+                            </div>
+                        )}
+
+                        <div className="flex justify-end gap-2">
+                            <button onClick={onCerrar} disabled={guardando}
+                                    className="px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors">
+                                Cancelar
+                            </button>
+                            <button onClick={guardar} disabled={guardando}
+                                    className="px-4 py-2 rounded-lg bg-primary hover:bg-blue-500 text-white font-bold transition-colors flex items-center gap-2 disabled:opacity-60">
+                                {guardando && <i className="fa-solid fa-circle-notch fa-spin"></i>}
+                                Guardar indicadores
+                            </button>
+                        </div>
                     </div>
                 </div>
             );
@@ -3491,6 +3684,35 @@
           };
 
           /**
+           * [MEJORA] Captura/actualización de indicadores desde la propia app.
+           * El backend hace upsert por "mes" (accionIndicador en Codigo.gs): si
+           * ya existe una fila para ese mes se actualiza, si no, se agrega. Es
+           * una escritura idempotente (repetir el mismo mes con los mismos
+           * datos dos veces produce el mismo resultado), así que puede usar
+           * reintentos con seguridad.
+           */
+          const guardarIndicador = async (datosForm) => {
+            try {
+              const resultado = await jsonpConReintentos({
+                action: 'save',
+                payload: JSON.stringify({ action: 'indicador', data: datosForm })
+              });
+              // La hoja Indicadores es pequeña (una fila por mes): se relee
+              // completa para reflejar el cambio de inmediato en el dashboard.
+              try {
+                const r = await jsonpConReintentos({ action: 'getIndicadores' });
+                setIndicadores(r.indicadores || []);
+              } catch (e) { /* el guardado sí ocurrió; la próxima sincronización lo trae */ }
+              setUltimaSync(new Date().toLocaleString('es-MX'));
+              return { ok: true, resultado };
+            } catch (error) {
+              console.error('guardarIndicador:', error);
+              if (esAccesoDenegado(error)) { cerrarSesion(); return { ok: false, error: 'Sesión expirada.' }; }
+              return { ok: false, error: mensajeAmigable(error) };
+            }
+          };
+
+          /**
            * [REV-14] Diagnóstico de la hoja destino desde el propio modal.
            * Responde en pantalla a "¿por qué no me deja dar de alta aquí?"
            * sin tener que abrir el editor de Apps Script: dice si la pestaña
@@ -3617,28 +3839,84 @@
             return msg || 'Error desconocido.';
           };
 
+          /**
+           * [MEJORA-SYNC] Escritura de UNA sola celda (historialEjecuciones),
+           * no de la fila completa del equipo.
+           *
+           * Antes, marcar/desmarcar un mes mandaba el `equipo` COMPLETO tal
+           * como lo tenía el navegador en memoria a `directSaveToSheets`
+           * (action 'edit'), y `accionEditar` en Codigo.gs sobrescribía la
+           * fila entera con esa copia. Si dos personas marcaban meses
+           * distintos del mismo equipo casi al mismo tiempo, la copia menos
+           * reciente pisaba a la más reciente sin ningún error visible — el
+           * síntoma reportado como "no se sincronizan los mantenimientos
+           * ejecutados".
+           *
+           * Ahora el backend (acción 'marcarEjecucion') LEE el valor actual
+           * de la celda en el momento de escribir, dentro del LockService, y
+           * solo agrega/quita ese mes — igual que ya hace accionPredictivo
+           * con las marcas de revisión rutinaria. El cliente manda un estado
+           * explícito (marcar: true/false), no un "toggle" relativo, así que
+           * la operación es idempotente y segura de reintentar.
+           */
+          const marcarEjecucionEnServidor = async (equipo, periodo, marcar, estadoPrevio) => {
+            if (!GOOGLE_SHEETS_WEBAPP_URL) return false;
+            setIsSyncing(true);
+            setSyncError(null);
+            try {
+              const resultado = await jsonpConReintentos({
+                action: 'save',
+                payload: JSON.stringify({
+                  action: 'marcarEjecucion',
+                  sheetName: equipo.origen,
+                  fila: equipo._fila,
+                  data: { numeroInventario: equipo.numeroInventario, mes: periodo, marcar }
+                })
+              });
+              setUltimaSync(new Date().toLocaleString('es-MX'));
+              // El servidor es la fuente de verdad del historial resultante:
+              // se reemplaza el campo local con lo que realmente quedó en la
+              // hoja en vez de confiar en el cálculo optimista del navegador.
+              if (resultado && typeof resultado.historialEjecuciones === 'string') {
+                setEquipos(actuales => actuales.map(eq =>
+                  eq.id === equipo.id ? { ...eq, historialEjecuciones: resultado.historialEjecuciones } : eq));
+              }
+              return true;
+            } catch (error) {
+              console.error(error);
+              if (estadoPrevio) setEquipos(estadoPrevio);
+              if (esAccesoDenegado(error)) { cerrarSesion(); return false; }
+              setSyncError('No se guardó la marca de mantenimiento: ' + error.message);
+              return false;
+            } finally {
+              setIsSyncing(false);
+            }
+          };
+
           const toggleMantenimientoEjecutado = (equipo, monthIndex, year) => {
               const strY = year.toString();
               const strM = (monthIndex + 1).toString().padStart(2, '0');
               const targetStr = `${strY}-${strM}`;
 
-              let historialArr = limpiarHistorial(equipo.historialEjecuciones);
-              if (historialArr.includes(targetStr)) { historialArr = historialArr.filter(h => h !== targetStr); } 
-              else { historialArr.push(targetStr); }
-              historialArr = [...new Set(historialArr)];
+              const historialActual = limpiarHistorial(equipo.historialEjecuciones);
+              const marcar = !historialActual.includes(targetStr);
 
-              const ejecutando = historialArr.includes(targetStr);
+              // Optimista: se pinta de inmediato con el cálculo local; si el
+              // servidor lo confirma, corrige con el valor real (arriba); si
+              // falla, se revierte al último estado confirmado.
+              let historialArr = historialActual.filter(h => h !== targetStr);
+              if (marcar) historialArr.push(targetStr);
               const updatedEquipo = { ...equipo, historialEjecuciones: historialArr.join(',') };
               const estadoPrevio = equipos;
               setEquipos(equipos.map(eq => eq.id === updatedEquipo.id ? updatedEquipo : eq));
 
-              directSaveToSheets(updatedEquipo, estadoPrevio).then(ok => {
+              marcarEjecucionEnServidor(equipo, targetStr, marcar, estadoPrevio).then(ok => {
                 // [REV-12 · MEJORA 6] Al marcar ejecutado se abre el detalle del
                 // mantenimiento. El folio de bitácora se levanta igual que antes;
                 // lo único que cambia es que ahora hay oportunidad de capturar
                 // hallazgos, refacciones y tiempo de paro sin salir del calendario.
                 // "Solo marcar" reproduce exactamente el comportamiento anterior.
-                if (ok && ejecutando) {
+                if (ok && marcar) {
                   setDetalleMP({
                     equipo,
                     periodo: targetStr,
@@ -6220,7 +6498,7 @@
 
               <main className="flex-1 p-0 md:p-6 overflow-y-auto relative">
                 <div className={`max-w-7xl mx-auto h-full ${activeTab === 'dashboard' ? 'p-0 md:p-0' : ''}`}>
-                  {activeTab === 'dashboard' && <IndicadoresDashboard equipos={equipos} indicadores={indicadores} sincronizando={isSyncing} errorSync={syncError} />}
+                  {activeTab === 'dashboard' && <IndicadoresDashboard equipos={equipos} indicadores={indicadores} sincronizando={isSyncing} errorSync={syncError} onGuardarIndicador={guardarIndicador} />}
                   {activeTab === 'equipos' && renderEquipos()}
                   {activeTab === 'calendarios' && renderCalendarios()}
                   {activeTab === 'predictivos' && renderPredictivos()}
